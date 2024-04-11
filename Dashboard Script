@@ -1,0 +1,73 @@
+import pandas as pd
+import datetime
+import win32com.client
+import dash
+from dash import html
+from dash import dcc
+from dash.dependencies import Input, Output
+import calendar
+
+# Function to read the input Excel file and extract relevant information
+def read_input_excel(file_path):
+    df = pd.read_excel(file_path)
+    return df
+
+# Function to check if email is sent for a deliverable and extract sender's information
+def get_email_info(subject, due_date, month_start, month_end):
+    outlook = win32com.client.Dispatch("Outlook.Application").GetNamespace("MAPI")
+    inbox = outlook.GetDefaultFolder(6)  # Inbox folder
+    messages = inbox.Items
+    email_info = {}
+    for message in messages:
+        if subject in message.Subject and month_start.date() <= message.SentOn.date() <= month_end.date():
+            sent_date = message.SentOn.date()
+            email_info[sent_date] = True
+    if not email_info:
+        # If no email was sent, check if it's late
+        if datetime.date.today() > due_date:
+            return 'red'
+        else:
+            return 'amber'
+    else:
+        return 'green'
+
+# Create Dash app
+app = dash.Dash(__name__)
+
+# Define layout
+app.layout = html.Div([
+    html.H1("Monthly Task Monitoring Dashboard"),
+    html.Table(id='deliverables-table', children=[
+        html.Thead([
+            html.Tr([html.Th("Activity Name"), html.Th("Due Date")] + [html.Th(date.strftime('%Y-%m-%d')) for date in pd.date_range(datetime.date.today().replace(day=1), datetime.date.today().replace(day=calendar.monthrange(datetime.date.today().year, datetime.date.today().month)[1]) + datetime.timedelta(days=1))])
+        ]),
+        html.Tbody(id='table-body')
+    ])
+])
+
+# Callback to update table
+@app.callback(
+    Output('table-body', 'children'),
+    [Input('interval-component', 'n_intervals')]
+)
+def update_table(n):
+    input_excel_path = 'input.xlsx'
+    df = read_input_excel(input_excel_path)
+    today = datetime.date.today()
+    month_start = today.replace(day=1)
+    month_end = today.replace(day=calendar.monthrange(today.year, today.month)[1])
+    rows = []
+    for index, row in df.iterrows():
+        color_info = get_email_info(row['Subject Name'], row['Due Date'].date(), month_start, month_end)
+        row_cells = [html.Td(row['Activity Name']), html.Td(row['Due Date'].strftime('%Y-%m-%d'))]
+        for date in pd.date_range(month_start, month_end):
+            if date in color_info:
+                row_cells.append(html.Td("✓", style={'color': color_info[date]}))
+            else:
+                row_cells.append(html.Td("", style={'background-color': color_info}))
+        rows.append(html.Tr(row_cells))
+    return rows
+
+# Run the app
+if __name__ == '__main__':
+    app.run_server(debug=True)
