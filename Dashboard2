@@ -1,0 +1,212 @@
+import pandas as pd
+import win32com.client
+from datetime import datetime, timedelta
+from openpyxl import load_workbook
+from openpyxl.styles import PatternFill
+
+# Load the Excel file
+file_path = 'Mailing_list.xlsx'
+config_df = pd.read_excel(file_path, sheet_name='Config')
+
+# Get the current date
+current_date = datetime.now().date()
+
+# Helper function to calculate the next reporting date
+def get_next_reporting_date(reporting_date, frequency):
+    reporting_date = datetime.strptime(reporting_date, '%Y-%m-%d').date()
+    if frequency == 'Daily':
+        return reporting_date + timedelta(days=1)
+    elif frequency == 'Weekly':
+        return reporting_date + timedelta(weeks=1)
+    elif frequency == 'Monthly':
+        return reporting_date + timedelta(days=30)  # Approximation
+    elif frequency == 'Quarterly':
+        return reporting_date + timedelta(days=90)  # Approximation
+    return reporting_date
+
+# Helper function to get all folders in Outlook
+def get_all_folders(parent_folder):
+    folders = [parent_folder]
+    try:
+        for folder in parent_folder.Folders:
+            folders.extend(get_all_folders(folder))
+    except AttributeError:
+        pass
+    return folders
+
+# Helper function to fetch emails from Outlook
+def fetch_emails(subject_keywords, start_date):
+    outlook = win32com.client.Dispatch("Outlook.Application")
+    namespace = outlook.GetNamespace("MAPI")
+    accounts = namespace.Folders
+    messages = []
+    
+    for account in accounts:
+        root_folder = account
+        all_folders = get_all_folders(root_folder)
+        
+        for folder in all_folders:
+            try:
+                items = folder.Items
+                items = items.Restrict("[ReceivedTime] >= '" + start_date.strftime('%m/%d/%Y') + "'")
+                
+                for item in items:
+                    if any(keyword.lower() in item.Subject.lower() for keyword in subject_keywords):
+                        messages.append(item)
+            except Exception as e:
+                print(f"Error fetching emails: {e}")
+    
+    return messages
+
+# Process the tasks
+results = []
+for index, row in config_df.iterrows():
+    task = row['Task']
+    frequency = row['Frequency']
+    email_sub = row['Email_sub']
+    reporting_date = row['Reporting Date']
+    sla = row['SLA']
+    reviewed = row['Reviewed']
+    
+    next_reporting_date = get_next_reporting_date(reporting_date, frequency)
+    
+    status = 'Pending'
+    if current_date > next_reporting_date:
+        status = 'Missed'
+    elif current_date == next_reporting_date:
+        status = 'Due'
+    else:
+        status = 'Pending'
+    
+    # Fetch emails related to the task
+    start_date = datetime.now() - timedelta(days=30)  # Looking back 30 days for emails
+    emails = fetch_emails([email_sub], start_date)
+    
+    email_sent = 'No'
+    email_reviewed = 'No'
+    sent_by = ''
+    reviewed_by = ''
+    
+    for email in emails:
+        if email_sub.lower() in email.Subject.lower():
+            email_sent = 'Yes'
+            sent_by = str(email.Sender)
+            if reviewed.lower() in email.Subject.lower():
+                email_reviewed = 'Yes'
+                reviewed_by = str(email.Sender)
+            break
+    
+    rag_status = 'Green' if email_sent == 'Yes' else ('Amber' if current_date == next_reporting_date else 'Red')
+    
+    results.append({
+        'Task': task,
+        'Frequency': frequency,
+        'Email_sub': email_sub,
+        'Reporting Date': reporting_date,
+        'Next Reporting Date': next_reporting_date,
+        'SLA': sla,
+        'Reviewed': reviewed,
+        'Status': status,
+        'Email Sent': email_sent,
+        'Sent By': sent_by,
+        'Email Reviewed': email_reviewed,
+        'Reviewed By': reviewed_by,
+        'RAG Status': rag_status
+    })
+
+# Create a DataFrame for the results
+results_df = pd.DataFrame(results)
+
+# Save the results to a new sheet in the same Excel file
+with pd.ExcelWriter(file_path, engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:
+    results_df.to_excel(writer, sheet_name='Tracking', index=False)
+
+# Load the workbook to apply conditional formatting
+wb = load_workbook(file_path)
+ws = wb['Tracking']
+
+# Define the colors for RAG status
+fill_red = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
+fill_amber = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+fill_green = PatternFill(start_color="00FF00", end_color="00FF00", fill_type="solid")
+
+# Apply the colors based on the RAG status
+for row in range(2, ws.max_row + 1):
+    rag_cell = ws[f'L{row}']  # Adjust the column index as needed
+    if rag_cell.value == 'Red':
+        rag_cell.fill = fill_red
+    elif rag_cell.value == 'Amber':
+        rag_cell.fill = fill_amber
+    elif rag_cell.value == 'Green':
+        rag_cell.fill = fill_green
+
+# Save the workbook
+wb.save(file_path)
+
+# Send an email with the tracking information
+outlook = win32com.client.Dispatch("Outlook.Application")
+mail = outlook.CreateItem(0)
+mail.To = 'manager@example.com'
+mail.Subject = 'Daily Tracking Report'
+
+# Create the HTML body for the email
+html_body = """
+<html>
+<head></head>
+<body>
+<p>Dear Manager,</p>
+<p>Please find below the daily tracking report:</p>
+<table border="1">
+<tr>
+<th>Task</th>
+<th>Frequency</th>
+<th>Email Subject</th>
+<th>Reporting Date</th>
+<th>Next Reporting Date</th>
+<th>SLA</th>
+<th>Reviewed</th>
+<th>Status</th>
+<th>Email Sent</th>
+<th>Sent By</th>
+<th>Email Reviewed</th>
+<th>Reviewed By</th>
+<th>RAG Status</th>
+</tr>
+"""
+
+for _, row in results_df.iterrows():
+    rag_color = {
+        'Red': '#FF0000',
+        'Amber': '#FFFF00',
+        'Green': '#00FF00'
+    }[row['RAG Status']]
+    
+    html_body += f"""
+    <tr>
+    <td>{row['Task']}</td>
+    <td>{row['Frequency']}</td>
+    <td>{row['Email_sub']}</td>
+    <td>{row['Reporting Date']}</td>
+    <td>{row['Next Reporting Date']}</td>
+    <td>{row['SLA']}</td>
+    <td>{row['Reviewed']}</td>
+    <td>{row['Status']}</td>
+    <td>{row['Email Sent']}</td>
+    <td>{row['Sent By']}</td>
+    <td>{row['Email Reviewed']}</td>
+    <td>{row['Reviewed By']}</td>
+    <td style="background-color:{rag_color};">{row['RAG Status']}</td>
+    </tr>
+    """
+
+html_body += """
+</table>
+<p>Best regards,<br>Your Name</p>
+</body>
+</html>
+"""
+
+mail.HTMLBody = html_body
+mail.Send()
+
+print("Tracking information with RAG status, Sent By, and Reviewed By has been successfully updated in the Excel file and emailed to the manager.")
